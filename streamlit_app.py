@@ -101,6 +101,81 @@ def get_agent() -> InventoryDecisionAgent:
 agent = get_agent()
 
 # -----------------------------------------------------------------------------
+# Data Upload & Analysis Helpers
+# -----------------------------------------------------------------------------
+REQUIRED_INVENTORY_CSV_COLUMNS = ["Product", "Category", "Units", "Unit Cost"]
+
+
+def validate_inventory_csv_columns(df: pd.DataFrame) -> List[str]:
+    """Return list of missing required column names, if any."""
+    return [col for col in REQUIRED_INVENTORY_CSV_COLUMNS if col not in df.columns]
+
+
+def analyze_inventory_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
+    """Perform inventory data analysis on the validated uploaded dataframe using pandas.
+
+    Calculates:
+    1. Total Units
+    2. Average Unit Cost
+    3. Product with highest Units
+    4. Total Units grouped by Category
+    5. Calculated column 'Inventory Value' = Units * Unit Cost
+    6. Total Inventory Value across all products
+    """
+    missing = validate_inventory_csv_columns(df)
+    if missing:
+        raise ValueError(f"Uploaded CSV is missing required column(s): {', '.join(missing)}")
+
+    # Operate on a copy to preserve uploaded data
+    df_calc = df.copy()
+
+    # Ensure numeric conversion using pandas
+    df_calc["Units"] = pd.to_numeric(df_calc["Units"], errors="coerce").fillna(0)
+    df_calc["Unit Cost"] = pd.to_numeric(df_calc["Unit Cost"], errors="coerce").fillna(0.0)
+
+    # 1. Total Units
+    total_units = float(df_calc["Units"].sum())
+
+    # 2. Average Unit Cost
+    avg_unit_cost = float(df_calc["Unit Cost"].mean()) if not df_calc.empty else 0.0
+
+    # 3. Product with the highest Units
+    if not df_calc.empty:
+        max_idx = df_calc["Units"].idxmax()
+        highest_units_product = str(df_calc.loc[max_idx, "Product"])
+        highest_units_val = float(df_calc.loc[max_idx, "Units"])
+    else:
+        highest_units_product = "N/A"
+        highest_units_val = 0.0
+
+    # 4. Group by Category and calculate total Units for each Category
+    category_units_df = (
+        df_calc.groupby("Category", as_index=False)["Units"]
+        .sum()
+        .rename(columns={"Units": "Total Units"})
+    )
+
+    # 5. Create new calculated column: Inventory Value = Units * Unit Cost
+    df_calc["Inventory Value"] = df_calc["Units"] * df_calc["Unit Cost"]
+
+    # 6. Total Inventory Value across all products
+    total_inventory_value = float(df_calc["Inventory Value"].sum())
+
+    return {
+        "num_rows": len(df_calc),
+        "num_columns": len(df_calc.columns),
+        "column_names": list(df_calc.columns),
+        "total_units": total_units,
+        "avg_unit_cost": avg_unit_cost,
+        "highest_units_product": highest_units_product,
+        "highest_units_val": highest_units_val,
+        "category_summary": category_units_df,
+        "total_inventory_value": total_inventory_value,
+        "processed_df": df_calc,
+    }
+
+
+# -----------------------------------------------------------------------------
 # Sidebar Navigation
 # -----------------------------------------------------------------------------
 with st.sidebar:
@@ -138,6 +213,97 @@ with st.sidebar:
         "- **Newsvendor**: $CR = C_u / (C_u + C_o)$ dictates whether to stock above or below mean."
     )
     st.caption("Supply Chain Analytics Decision Support System v2.0")
+
+    # -------------------------------------------------------------------------
+    # DATA UPLOAD (Last Section in Sidebar)
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.markdown("### 📁 Data Upload")
+    uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
+
+
+# -----------------------------------------------------------------------------
+# MAIN PAGE: CSV DATA PROCESSING & ANALYSIS
+# -----------------------------------------------------------------------------
+if uploaded_file is not None:
+    try:
+        raw_df = pd.read_csv(uploaded_file)
+        missing_columns = validate_inventory_csv_columns(raw_df)
+
+        if missing_columns:
+            st.error(
+                f"❌ **Validation Error:** Missing required column(s): **{', '.join(missing_columns)}**.  \n"
+                f"The CSV file must contain the following columns: `Product`, `Category`, `Units`, `Unit Cost`."
+            )
+        else:
+            analysis = analyze_inventory_dataframe(raw_df)
+            processed_df = analysis["processed_df"]
+
+            st.markdown('<div class="main-title">📁 Uploaded CSV Data & Inventory Analysis</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="subtitle">Dataset: <b>{uploaded_file.name}</b> &mdash; '
+                f'Validation and supply chain inventory calculations executed using pandas.</div>',
+                unsafe_allow_html=True,
+            )
+
+            # 1. Dataset Dimensions & Column Metadata
+            meta_col1, meta_col2, meta_col3 = st.columns(3)
+            meta_col1.metric("Rows", f"{analysis['num_rows']:,}")
+            meta_col2.metric("Columns", f"{analysis['num_columns']}")
+            meta_col3.metric("Column Names", ", ".join(analysis["column_names"]))
+
+            # 2. Key Supply Chain Inventory Metrics (KPIs)
+            st.markdown("### 📊 Inventory Analysis Summary")
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            kpi1.metric("Total Units", f"{analysis['total_units']:,.0f}")
+            kpi2.metric("Average Unit Cost", f"${analysis['avg_unit_cost']:,.2f}")
+            kpi3.metric("Product with Highest Units", f"{analysis['highest_units_product']}", help=f"{analysis['highest_units_val']:,.0f} units")
+            kpi4.metric("Total Inventory Value", f"${analysis['total_inventory_value']:,.2f}")
+
+            # 3. Category Breakdown (Units by Category)
+            st.markdown("### 🏷️ Total Units by Category")
+            cat_col1, cat_col2 = st.columns([1, 1], gap="large")
+            with cat_col1:
+                st.dataframe(
+                    analysis["category_summary"].style.format({"Total Units": "{:,.0f}"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            with cat_col2:
+                fig_cat = go.Figure(
+                    go.Bar(
+                        x=analysis["category_summary"]["Category"],
+                        y=analysis["category_summary"]["Total Units"],
+                        marker_color="#3B82F6",
+                        text=[f"{v:,.0f}" for v in analysis["category_summary"]["Total Units"]],
+                        textposition="auto",
+                    )
+                )
+                fig_cat.update_layout(
+                    title="Total Units by Category",
+                    xaxis_title="Category",
+                    yaxis_title="Units",
+                    template="plotly_white",
+                    margin=dict(l=20, r=20, t=40, b=20),
+                )
+                st.plotly_chart(fig_cat, use_container_width=True)
+
+            # 4. Display Processed Dataframe with new Inventory Value column (formatted as currency)
+            st.markdown("### 📋 Uploaded Inventory Data (with Calculated Inventory Value)")
+            display_format = {
+                "Units": "{:,.0f}",
+                "Unit Cost": "${:,.2f}",
+                "Inventory Value": "${:,.2f}",
+            }
+            applicable_format = {col: fmt for col, fmt in display_format.items() if col in processed_df.columns}
+            st.dataframe(
+                processed_df.style.format(applicable_format),
+                use_container_width=True,
+            )
+
+            st.markdown("---")
+    except Exception as e:
+        st.error(f"❌ Failed to process uploaded CSV file: {e}")
 
 
 # =============================================================================
